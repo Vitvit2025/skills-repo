@@ -3,7 +3,7 @@
 Ставятся через [skills CLI](https://skills.sh):
 
 ```bash
-npx skills add <owner>/skills-repo@graphiti-memory -g -y     # → ~/.agents/skills/graphiti-memory (+ симлинк в ~/.claude/skills)
+npx skills add Vitvit2025/skills-repo@graphiti-memory -g -y     # → ~/.agents/skills/graphiti-memory (+ симлинк в ~/.claude/skills)
 npx skills update                                            # обновить все
 ```
 
