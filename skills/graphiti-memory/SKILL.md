@@ -88,6 +88,7 @@ description: >-
 |---|---|
 | «поищи в памяти / вспомни / что мы решали про X» | `search_memory_facts(query, max_facts=15)` — факты с датами; затем `search_nodes(query)` — карточки со сводками. Русские и английские формулировки, 2–3 варианта запроса. |
 | «когда это менялось / как было раньше» | те же поиски, читать `valid_at` / `invalid_at`. **Факт с `invalid_at` не выбрасывать** — это история («было так до …»); Graphiti сам гасит старый факт при появлении противоречащего. `search_memory_facts` умеет фильтры по датам. |
+| «о чём вообще память про X / дай сводку темы / расскажи историю X» | `search_nodes(query, entity_types=["Community"], max_nodes=5)` — **сообщества**: связный абзац-сводка на кластер карточек (Лувен), в `attributes` — число и имена участников. Это «глава», а не факт: дальше уточнять `search_memory_facts`. Строятся `scripts/communities.sh` (раз в неделю кроном; после большой докачки — вручную). |
 | «что зависит от X / что связано с X» | `search_nodes(X)` → uuid карточки → `search_memory_facts(query, center_node_uuid=uuid)` — реранк вокруг узла; `get_entity_edge(uuid)` для деталей. |
 | «запомни в граф / сохрани вывод» | `add_memory(name="<тема, дата>", episode_body="<2–6 предложений: что решили, что изменилось, почему>", source="text", source_description="итог сессии", reference_time=<ISO сейчас>)`. Без секретов (значения ключей/паролей — никогда). Одна-две записи в конце сессии, полминуты и копейки. Точечный факт без модели — `add_triplet`. |
 | «догрузи память / обнови граф» | `scripts/cron_load.sh` вручную (то же, что ночью; flock). Долгие загрузки — под сторожем `chain_watch.sh`. |
@@ -116,7 +117,9 @@ config.yaml                 конфиг MCP: типы сущностей    bui
 140 мс → 1.5 мс) · `embed_chunk_patch.py` (≤32 текстов/запрос) · `merge_aliases.py` · `scrub_graph.py` · `build_main.sh` ·
 `cron_load.sh` · `fixup.sh` (добивка сорванных порций) · `backup.sh` (снимок FalkorDB) · `chain_watch.sh` · `status.sh` · `setup.sh` ·
 `tei.sh` · `mcp_client.py` · `or_proxy.py` (учёт расходов, опционально) · `lib.sh` · `sitecustomize.py` (патчи в MCP-сервер) ·
-`start-services.sh` (entrypoint контейнера: ждёт PONG).
+`start-services.sh` (entrypoint контейнера: ждёт PONG) · `build_communities.py` + `communities.sh` (сообщества: `--plan` / сборка /
+`--rename-only`; штатный label propagation Graphiti без предела итераций зацикливается, а гигантский ком режется Лувеном ≤100 карточек) ·
+`community_search_patch.py` (MCP `search_nodes(entity_types=["Community"])` → поиск по сообществам; у MCP 1.29 своего инструмента нет).
 
 ## Шесть правил, которые нельзя нарушать
 

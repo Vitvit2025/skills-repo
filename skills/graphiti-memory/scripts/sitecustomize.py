@@ -6,5 +6,6 @@ if os.environ.get('GRAPHITI_PATCH', '0') == '1':
     try:
         import embed_chunk_patch  # noqa: F401  — ≤32 текстов на запрос к TEI
         import falkor_vector_patch  # noqa: F401  — HNSW-индекс вместо скана, быстрый fulltext/uuid-поиск фактов
+        import community_search_patch  # noqa: F401  — search_nodes(entity_types=["Community"]) ищет по сообществам
     except Exception as e:  # никогда не ронять процесс из-за патча
         print(f'sitecustomize: патч не применён: {e!r}', flush=True)

@@ -24,6 +24,22 @@ scripts/mcp_client.py add_memory '{"name":"итог 15.09","episode_body":"Ре�
 ```
 Cypher по карточке: `$R GRAPH.QUERY main "MATCH (n:Entity) WHERE n.name CONTAINS '201.51' RETURN n.name, labels(n), left(n.summary,200)"`
 
+## Сообщества (сводки по кластерам карточек)
+```bash
+scripts/communities.sh --plan        # кластеризация без модели: гистограмма размеров, оценка вызовов, состав → state/communities_plan.json
+scripts/communities.sh               # снести старые :Community графа и построить заново (main: 320 сообществ, ~4 мин, <$1 на flash-lite)
+scripts/communities.sh --rename-only # срезать «This summary details…» у имён + пересчитать name_embedding
+scripts/mcp_client.py search_nodes '{"query":"Алматы двойник","entity_types":["Community"],"max_nodes":3}'   # поиск по сообществам
+$R GRAPH.QUERY main "MATCH (c:Community)-[:HAS_MEMBER]->(m) WITH c, count(m) AS n ORDER BY n DESC LIMIT 10 RETURN n, c.name"
+```
+Как устроено: label propagation (свой, с пределом итераций — штатный в graphiti-core 0.30 зацикливается на плотном графе) даёт
+один ком на ~80 % карточек (хабы «Владелец»/прод) + мелочь; ком режется Лувеном (networkx есть в образе) до ≤100 карточек
+(`MAX_SIZE`), кластеры <3 (`MIN_SIZE`) без сводки. Сводка = попарное слияние сводок участников моделью (N−1 вызовов) + одно
+предложение-имя. Сообщества НЕ обновляются при докачке (`add_memory` их не трогает) — пересборка кроном раз в неделю
+(`30 4 * * 0`, после ночной докачки) или вручную после большой загрузки. Поиск в MCP: `community_search_patch.py`
+(грузится sitecustomize) подменяет `Graphiti.search_` только при `entity_types=["Community"]`; для FalkorDB драйвер
+клонируется на граф сообщества (`driver.clone(database=group_id)`), иначе участники считаются в `default_db` → 0.
+
 ## Докачка
 ```bash
 scripts/cron_load.sh                                # то же, что ночью: память → транскрипты → инбокс → склейка → контроль
