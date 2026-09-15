@@ -1,0 +1,142 @@
+# Конфиг MCP-сервера Graphiti (config.yaml в контейнере). Типы сущностей — doc-only (без атрибутов): имена, совпадающие с
+# встроенными (Person, Organization, Document…), подтягивают rich-модели и отдельный LLM-вызов на каждую карточку (в 7 раз дороже).
+# Значения ${VAR} подставляются из env контейнера (см. docker-compose.yml, сгенерированный gm_config.py render-compose).
+# Graphiti MCP Server Configuration
+# This file supports environment variable expansion using ${VAR_NAME} or ${VAR_NAME:default_value}
+#
+# IMPORTANT: Set SEMAPHORE_LIMIT environment variable to control episode processing concurrency
+# Default: 10 (suitable for OpenAI Tier 3, mid-tier Anthropic)
+# See README.md "Concurrency and LLM Provider 429 Rate Limit Errors" section for tuning guidance
+
+server:
+  transport: "http"  # Options: stdio, sse (deprecated), http
+  host: "0.0.0.0"
+  port: 8000
+  
+llm:
+  provider: "openai"  # OpenAI-совместимый API (OpenRouter и т.п.); нативный anthropic-клиент в образе сломан (unexpected kwarg temperature)
+  model: ${MODEL_NAME:google/gemini-2.5-flash-lite}
+  max_tokens: 4096
+  # Use json_object for OpenAI-compatible providers that accept json_schema
+  # but do not reliably enforce the requested Pydantic schema.
+  structured_output_mode: ${LLM_STRUCTURED_OUTPUT_MODE:json_schema}
+  
+  providers:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      api_url: ${OPENAI_API_URL:https://api.openai.com/v1}
+      organization_id: ${OPENAI_ORGANIZATION_ID:}
+      
+    azure_openai:
+      api_key: ${AZURE_OPENAI_API_KEY}
+      api_url: ${AZURE_OPENAI_ENDPOINT}
+      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
+      deployment_name: ${AZURE_OPENAI_DEPLOYMENT}
+      use_azure_ad: ${USE_AZURE_AD:false}
+      
+    anthropic:
+      api_key: ${ANTHROPIC_API_KEY}
+      api_url: ${ANTHROPIC_API_URL:https://api.anthropic.com}
+      max_retries: 3
+      
+    gemini:
+      api_key: ${GOOGLE_API_KEY}
+      project_id: ${GOOGLE_PROJECT_ID:}
+      location: ${GOOGLE_LOCATION:us-central1}
+      
+    groq:
+      api_key: ${GROQ_API_KEY}
+      api_url: ${GROQ_API_URL:https://api.groq.com/openai/v1}
+
+embedder:
+  provider: "openai"  # Options: openai, azure_openai, gemini, voyage
+  model: ${EMBEDDER_MODEL:BAAI/bge-m3}
+  dimensions: ${EMBEDDER_DIMENSIONS:1024}
+  
+  providers:
+    openai:
+      api_key: ${EMBEDDER_API_KEY:local}
+      api_url: ${EMBEDDER_API_URL:http://172.17.0.1:18081/v1}
+      organization_id: ${OPENAI_ORGANIZATION_ID:}
+      
+    azure_openai:
+      api_key: ${AZURE_OPENAI_API_KEY}
+      api_url: ${AZURE_OPENAI_EMBEDDINGS_ENDPOINT}
+      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
+      deployment_name: ${AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT}
+      use_azure_ad: ${USE_AZURE_AD:false}
+      
+    gemini:
+      api_key: ${GOOGLE_API_KEY}
+      project_id: ${GOOGLE_PROJECT_ID:}
+      location: ${GOOGLE_LOCATION:us-central1}
+      
+    voyage:
+      api_key: ${VOYAGE_API_KEY}
+      api_url: ${VOYAGE_API_URL:https://api.voyageai.com/v1}
+      model: "voyage-3"
+
+database:
+  provider: "falkordb"  # Default: falkordb. Options: neo4j, falkordb
+
+  providers:
+    falkordb:
+      uri: ${FALKORDB_URI:redis://localhost:6379}
+      password: ${FALKORDB_PASSWORD:}
+      database: ${FALKORDB_DATABASE:default_db}
+
+    neo4j:
+      uri: ${NEO4J_URI:bolt://localhost:7687}
+      username: ${NEO4J_USER:neo4j}
+      password: ${NEO4J_PASSWORD}
+      database: ${NEO4J_DATABASE:neo4j}
+      use_parallel_runtime: ${USE_PARALLEL_RUNTIME:false}
+
+graphiti:
+  group_id: ${GRAPHITI_GROUP_ID:main}
+  episode_id_prefix: ${EPISODE_ID_PREFIX:}
+  user_id: ${USER_ID:mcp_user}
+  entity_types:
+    - name: "Server"
+      description: "A physical or virtual machine (VPS) identified by IP address and/or hostname/nickname. IP, hostname and nickname of the same machine are ONE entity (e.g. 10.0.0.5 = prod = Amsterdam). Do NOT create entities for network interfaces, ports or firewall chains."
+    - name: "Service"
+      description: "Named software component running on a server: container, daemon, systemd unit, bot, cron job, database, proxy, script (n8n, Supabase, nginx, Telegram bot, backup script)."
+    - name: "Project"
+      description: "Business or technical project/initiative of the owner (add examples of YOUR projects here)."
+    - name: "Domain"
+      description: "DNS domain, site or URL endpoint (example.com, grafana.example.com, mail.example.com)."
+    - name: "Incident"
+      description: "A dated event: outage, failure, security finding, migration, reboot, audit, decision. Always carries a date."
+    - name: "Credential"
+      description: "A named secret (token, password, key, API access) referenced ONLY by its name, purpose and storage path — never by value. Do not create entities for environment variable names alone."
+    - name: "Runbook"
+      description: "Recipe, command sequence or standard operating procedure (how to restore, how to sync, how to check)."
+    - name: "Rule"
+      description: "Owner's rules, preferences and working-style instructions for the assistant (what to confirm, how to report, terminology)."
+    - name: "Human"
+      description: "An individual human (owner, operators, clients, contractors)."
+    - name: "Company"
+      description: "Company, provider, institution (Timeweb, Beget, Selectel, Bitrix, Avito)."
+    - name: "Tool"
+      description: "Software product, model, API or skill used by the owner or assistant (Claude Code, OpenRouter, Graphiti, a named skill). Use only for named tools, not for file paths."
+
+  # Optional edge (fact) types. When a name matches a model registered in
+  # src/models/edge_types.py the rich Pydantic model is used; otherwise a
+  # documentation-only model is built from the description below. Leave this
+  # list empty to keep graphiti-core's default edge extraction behavior.
+  # edge_types:
+  #   - name: "WorksFor"
+  #     description: "Employment or membership of a person in an organization"
+  #   - name: "LocatedAt"
+  #     description: "An entity is situated at or within a location"
+
+  # Optional constraint on which edge types may connect which entity types.
+  # 'Entity' acts as a wildcard for either endpoint. Mirrors graphiti-core's
+  # edge_type_map. Leave empty to allow any configured edge type anywhere.
+  # edge_type_map:
+  #   - source: "Person"
+  #     target: "Organization"
+  #     edge_types: ["WorksFor"]
+  #   - source: "Entity"
+  #     target: "Location"
+  #     edge_types: ["LocatedAt"]

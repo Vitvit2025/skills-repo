@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+*.log
+state/
+sessions_filtered/
+tei-data/
+or_usage.jsonl

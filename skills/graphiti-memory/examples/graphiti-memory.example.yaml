@@ -1,0 +1,94 @@
+# graphiti-memory.yaml — ШАБЛОН. Скопируй, заполни, положи в <deploy_dir>/conf/graphiti-memory.yaml (chmod 600).
+# Секретов здесь НЕТ: ключ API — в <deploy_dir>/.env (llm.env_file), токен Telegram — в alerts.env_file.
+# Полный рабочий пример — prod-ams.graphiti-memory.yaml. Проверка: scripts/gm_config.py check
+
+deploy_dir: /opt/graphiti-memory
+container: graphiti-mcp
+image: zepai/knowledge-graph-mcp:latest
+graph: main                                    # единый граф = group_id по умолчанию MCP
+container_python: /app/mcp/.venv/bin/python
+host_python: /opt/graphiti-memory/.venv/bin/python   # setup.sh создаст venv с redis + pyyaml
+
+server:
+  ip: 10.0.0.5
+  name: "10.0.0.5 (prod, Amsterdam)"           # {server} в заголовках эпизодов и инструкциях
+
+ports: {falkordb: 6379, mcp: 8000, ui: 3001}   # только 127.0.0.1; setup.sh --firewall добавит ip6tables-DROP
+
+llm:
+  env_file: .env
+  api_key_var: OPENAI_API_KEY
+  api_url: https://openrouter.ai/api/v1
+  model: google/gemini-2.5-flash-lite          # извлечение
+  small_model: anthropic/claude-haiku-4.5      # дедуп/инвалидация
+  mcp_model: google/gemini-2.5-flash-lite
+  mcp_api_url: https://openrouter.ai/api/v1    # или учётный прокси or_proxy: http://172.17.0.1:18001/v1
+
+embedder:
+  model: BAAI/bge-m3
+  dimensions: 1024
+  bulk_api_url: https://openrouter.ai/api/v1   # массовая загрузка — облако
+  mcp_api_url: http://172.17.0.1:18081/v1      # MCP — локальный TEI (tei.sh); если TEI нет — тот же bulk_api_url
+  local_tei: {enabled: true, container: graphiti-embed, image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest, port: 18081, cpus: 4, memory: 6g, data_dir: tei-data}
+
+mcp: {semaphore: 5}
+load: {semaphore: 60, batch: 12, falkor_max_conn: 4096, vector_index: true, chunk_limit: 2500, llm_timeout: 120, emb_timeout: 20,
+       log_filter: "not found in nodes|invalid duplicate|Unterminated|unknown entity"}
+
+sources:
+  memory:                                      # файловая память Claude Code (*.md)
+    path: /root/.claude/projects/-root/memory
+    mount: /data/memory
+    exclude: []                                # файлы про сам граф дают мета-факты — сюда
+    skip_index: [MEMORY.md]
+  archives: []                                 # - {label: oldmem, path: /root/old_memory, mount: /data/oldmem, manifest: manifest.json, historical_note: "[АРХИВ, написано {written_at}] "}
+  transcripts:                                 # транскрипты сессий Claude Code этого сервера (фильтруются на хосте)
+    path: /root/.claude/projects/-root
+    min_idle_hours: 2
+    header: "[Транскрипт сессии Claude Code на {server}, тема «{title}», {date}, часть {part}]"
+    name_prefix: sess
+  archive_transcripts: []                      # - {label: oldsess, path: /root/old_sessions, header: "[…{title}, {date}, часть {part}]", instruction: transcripts_archive}
+  inbox: {}                                    # {path: /root/inbox/inbox.jsonl, bot: "@my_inbox_bot", min_chars: 20}
+
+build:
+  steps:                                       # самый большой блок первым, дальше хронологически
+    - {kind: memory}
+    - {kind: transcripts}
+
+secrets:
+  files:                                       # ВСЕ места с реальными секретами — словарь фильтра (только в памяти процесса)
+    - /etc/myapp/*.env
+    - /root/*/.env
+    - /root/.ssh/*
+    - /root/.claude/.credentials.json
+  skip_file_re: '(\.lock$|\.pub$|known_hosts|authorized_keys|\.example$)'
+  exclude_rules_prose: [kv_ru]
+  # extra_patterns: [{name: mytoken, regex: 'mt_[A-Za-z0-9]{32}'}]
+
+aliases:                                       # канон ← прозвища (склейка после докачки)
+  10.0.0.5: {labels: [Server], aliases: [prod, прод, Amsterdam]}
+  Владелец: {labels: [Human], aliases: [Owner, owner, "123456789"]}
+  Claude Code: {labels: [Tool], aliases: [Claude, Ассистент]}
+alias_rules: {local_ips: [127.0.0.1, 172.17.0.1, localhost, 0.0.0.0]}
+
+instructions:
+  memory: >-
+    Текст — рабочие заметки админа об инфраструктуре и проектах владельца. IP-адрес, hostname и разговорное имя одной машины
+    (например «прод», «{ip}») — ОДНА сущность Server; называй её по IP. Не создавай сущности для путей к файлам, имён файлов,
+    кодов ошибок, переменных окружения, портов и сетевых интерфейсов. Никогда не извлекай значения секретов — только названия и где лежат.
+    invalid_at ставь ТОЛЬКО если в тексте явно сказано, что факт перестал быть верным («закрыто», «больше не», «устарело», «до <дата>»,
+    «заменили на»); не выдумывай даты окончания и не ставь invalid_at по дате файла.
+  transcripts: >-
+    Текст — ТРАНСКРИПТ диалога владельца с ассистентом Claude на сервере {server}. Извлекай решения, факты об инфраструктуре и проектах,
+    проблемы и причины, правила и предпочтения владельца. Не извлекай сущности из служебных фраз, путей, имён файлов, кодов ошибок,
+    переменных, портов. IP, hostname и прозвище одной машины — ОДНА сущность Server по IP. Ассистента (Claude Code) НЕ делай субъектом
+    фактов; владелец — сущность Human «Владелец» (одна). Метки [REDACTED:…] — вырезанные секреты, не сущности.
+    invalid_at — только при явном «закрыто / больше не / устарело / до <дата>».
+  transcripts_archive: >-
+    Текст — ТРАНСКРИПТ диалога владельца с ассистентом Claude на СТАРОМ сервере (до переезда). Остальные правила — как для transcripts.
+  inbox: >-
+    Текст — сообщение владельца в свой Telegram-бот-инбокс. Извлекай факты, решения, задачи и предпочтения; владелец — Human «Владелец».
+    Метки [REDACTED:…] — не сущности. invalid_at — только при явном «закрыто/больше не/устарело».
+
+alerts: {env_file: /etc/myapp/telegram.env, token_var: BOT_TOKEN, chat_var: ALERT_CHAT_ID}   # только ошибки/секреты
+cron: {schedule: "30 3 * * *", lock: /run/graphiti-cron.lock}
