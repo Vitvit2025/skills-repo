@@ -25,7 +25,14 @@ python3 "$SK/gm_config.py" check || echo "!! проверь конфиг (см. 
 # host venv для scrub_graph (redis) — если host_python указывает в venv, которого нет
 HP=$(python3 "$SK/gm_config.py" get host_python)
 if [[ "$HP" == */.venv/bin/python ]] && [ ! -x "$HP" ]; then python3 -m venv "$(dirname "$(dirname "$HP")")" && "$(dirname "$HP")/pip" install -q redis pyyaml && echo "== venv $HP: redis, pyyaml"; fi
-cd "$DEPLOY" && docker compose up -d && echo "== контейнер поднят; ждём healthy…" && sleep 20
+mkdir -p "$(GRAPHITI_MEMORY_CONFIG=$DEPLOY/conf/graphiti-memory.yaml python3 "$SK/gm_config.py" get backup.dir 2>/dev/null || echo "$DEPLOY/backups")"
+CN=$(python3 "$SK/gm_config.py" get container)
+# 🔴 пересоздание контейнера с непустым томом = снимок ДО (правило: бэкап перед установкой важного)
+if docker inspect "$CN" >/dev/null 2>&1 && [ -x "$DEPLOY/scripts/backup.sh" ]; then "$DEPLOY/scripts/backup.sh" pre-setup || echo "!! снимок не сделан (контейнер не отвечает?) — продолжаю"; fi
+cd "$DEPLOY" && docker compose up -d && echo "== контейнер поднят; ждём PONG от FalkorDB (большой RDB грузится ~1 мин)…"
+t0=$(date +%s); until [ "$(docker exec "$CN" redis-cli ping 2>/dev/null)" = "PONG" ] || [ $(( $(date +%s)-t0 )) -gt 600 ]; do sleep 5; done
+sleep 10; echo "== рестартов контейнера: $(docker inspect -f '{{.RestartCount}}' "$CN") (ожидается 0; >0 = MCP стартует раньше базы — проверь entrypoint/start-services.sh)"
+docker logs "$CN" 2>&1 | grep -a -q "falkor_vector_patch: dim=" && echo "== патч graphiti-core в MCP-сервере: включён" || echo "!! патч в MCP-сервере НЕ виден в логах (PYTHONPATH/GRAPHITI_PATCH в compose?) — поиск на большом графе будет виснуть"
 PORT=$(python3 "$SK/gm_config.py" get ports.mcp)
 curl -s -o /dev/null -w "MCP http://127.0.0.1:$PORT/mcp → HTTP %{http_code} (406/400 = жив, ждёт MCP-заголовки)\n" "http://127.0.0.1:$PORT/mcp" || true
 if [ $FW = 1 ]; then

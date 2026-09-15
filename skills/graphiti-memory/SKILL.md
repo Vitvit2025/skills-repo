@@ -39,12 +39,21 @@ description: >-
    это словарь фильтра), `aliases` (прозвища серверов/людей → канон), `instructions.*` (подставь свой сервер),
    модели. Секретов в yaml НЕТ — ключ в `.env` (600), токен алертов в своём env-файле.
 2. **Развёртывание:** `scripts/setup.sh --config my.graphiti-memory.yaml --firewall --mcp --tei`
-   — создаёт `deploy_dir` (conf/ scripts/ state/ sessions_filtered/), `.env` из примера (заполнить `OPENAI_API_KEY` и
+   — создаёт `deploy_dir` (conf/ scripts/ state/ sessions_filtered/ backups/), `.env` из примера (заполнить `OPENAI_API_KEY` и
    повторить), `docker-compose.yml` по конфигу (порты ТОЛЬКО 127.0.0.1; каталоги монтируются каталогами, не файлами —
    bind-mount файла держит старый inode), venv на хосте (redis, pyyaml), `docker compose up -d`, ip6tables-DROP
    (IPv6 обходит привязку к localhost — грабля аудита), `claude mcp add --transport http --scope user graphiti http://127.0.0.1:8000/mcp`
    (endpoint без слэша; инструменты появятся в новых сессиях), локальный эмбеддер TEI (для MCP; массовую загрузку он не тянет).
-3. **Проверка:** `scripts/gm_config.py check` (пути, env, права), `scripts/status.sh`, `scripts/mcp_client.py`.
+   Если контейнер с данными уже есть — setup сам делает снимок (`backup.sh pre-setup`) перед пересозданием.
+   **Два обязательных элемента compose, которые setup ставит сам** (без них память сломается на большом графе):
+   - `PYTHONPATH=/app/loaders` + `GRAPHITI_PATCH=1` + `VECTOR_INDEX=1` → `scripts/sitecustomize.py` подгружает наши патчи
+     graphiti-core **в сам MCP-сервер**. Без этого MCP ищет полным сканом (+ fulltext-перебор 0.30.1): на 7 тыс. карточек /
+     33 тыс. фактов один `search_memory_facts` висел >120 с, поток FalkorDB на 100 %, база переставала отвечать на PING.
+     С патчем — 0,2–1,3 с. Проверка: `docker logs <container> | grep falkor_vector_patch`.
+   - `entrypoint: /start-services.sh` (копия скрипта образа с фиксом): ждать именно `PONG`. Штатный скрипт принимал ответ
+     `LOADING` (RDB 360 МБ грузится ~1 мин), MCP стартовал раньше базы, падал, контейнер уходил в цикл рестартов, и
+     загрузка RDB начиналась заново. Проверка: `docker inspect -f '{{.RestartCount}}' <container>` = 0.
+3. **Проверка:** `scripts/gm_config.py check` (пути, env, права), `scripts/status.sh` (в т.ч. рестарты и патч), `scripts/mcp_client.py`.
    Фильтр: `scripts/secret_filter.py --self-test` (должен напечатать `self-test: OK`).
 4. **Загрузка корпуса** — `build.steps` в конфиге, порядок: **самый большой блок первым, дальше хронологически**
    (архив памяти → старые транскрипты → память сервера → его транскрипты → инбокс). Один писатель, параллелить нельзя.
@@ -56,11 +65,20 @@ description: >-
    3 тыс. кусков ≈ 6 ч и ≈ $15 на flash-lite + Haiku-дедуп. После каждого блока скрипт сам делает `merge_aliases`, в конце `scrub_graph`.
    Если самый большой архив уже загружен в отдельный граф — не грузи заново: `GRAPH.COPY <старый> main` + перекраска
    `group_id` + копия state (см. runbook «Собрать main из существующего графа»).
+   **После сборки:** `grep -a -c "!! batch" build_main.log` — сорванные порции (модель вернула битый JSON после ретраев,
+   у нас 2 из 233); state их не отмечает → `nohup setsid scripts/fixup.sh > fixup.log 2>&1 &` догружает только их
+   (порция 6), потом склейка и контроль. Затем выгрузи имена карточек Server/Human из графа, допиши прозвища
+   в `aliases` и прогони `merge_aliases` ещё раз (см. runbook «Склейка»).
 5. **Приёмка:** поиск без `group_ids` (`search_nodes` «прод» → одна карточка сервера; `search_memory_facts` «что зависит от X»
-   с датами); `status.sh` — 2 векторных индекса, доля `invalid_at` 20–40 % нормальна; `scrub_graph.py` (без `--apply`) → 0.
+   с датами) — ответ за секунды, не минуты; `status.sh` — 2 векторных индекса, рестартов 0, патч в MCP виден, доля
+   `invalid_at` 20–40 % нормальна; `scrub_graph.py` (без `--apply`) → 0.
 6. **Крон:** `scripts/setup.sh --config … --cron` (или строку из runbook). Ночью: память с хеш-именами → транскрипты
    (idle ≥ 2 ч) → инбокс → склейка → контроль секретов; Telegram — только при ошибках.
-7. **Бэкап:** том `<compose>_falkordb_data` — в ночной бэкап; граф в любой момент пересобирается из источников.
+7. **Бэкап — ПЕРЕД любым разрушительным** (правило владельца: сначала снимок, потом действие; путь снимка и команду
+   отката — в отчёт): `scripts/backup.sh <метка>` = `redis-cli SAVE` + копия `dump.rdb` (600) в `backup.dir` с ретенцией
+   `backup.keep`. Делать перед `GRAPH.DELETE`, `clear_graph`, пересозданием контейнера (`docker compose up -d` после правки
+   compose), сменой эмбеддера. Том `<compose>_falkordb_data` — дополнительно в ночной бэкап; граф в любой момент
+   пересобирается из источников.
 
 ## Режим Б — РАБОТАТЬ (в сессии Claude Code)
 
@@ -76,7 +94,9 @@ description: >-
 | «состояние графа / что в памяти» | `get_status`; `scripts/status.sh` (карточки/факты/эпизоды, invalid_at, типы, индексы, последняя докачка). |
 | «дубли / прод три раза» | добавить прозвища в `aliases` конфига → `merge_aliases.py --graph main` (план) → `--apply`. Прогонять после каждой докачки. |
 | «в графе секрет/телефон» | `scrub_graph.py --graphs main` (отчёт) → `--apply`; заодно проверить, попал ли источник под фильтр (`secrets.files`). |
-| «почини докачку» | `cron_load.log` / `cron_load.err`; `!! batch` = сорванная порция (state не отмечен, догрузится); типовые причины — в `reference/memory-guide.md` «Все грабли». |
+| «почини докачку» | `cron_load.log` / `cron_load.err`; `!! batch` = сорванная порция (state не отмечен) → `scripts/fixup.sh` догрузит только её; типовые причины — в `reference/memory-guide.md` «Все грабли». |
+| «поиск в памяти висит / база не отвечает» | `status.sh`: патч в MCP виден? рестартов 0? Если поиск >10 с — в compose нет `PYTHONPATH=/app/loaders`+`GRAPHITI_PATCH=1` → `render-compose` → **`backup.sh`** → `docker compose up -d`. Если FalkorDB завис на запросе (100 % одно ядро, PING молчит) — `docker restart -t 5 <container>` после снимка (RDB на диске автосохраняется). |
+| «сделай снимок / перед этим забэкапь» | `scripts/backup.sh <метка>` → путь снимка и команду отката в отчёт. |
 
 Регламент: в **начале** сессии по теме — один `search_memory_facts` + `search_nodes`; в **конце** — `add_memory` с итогом.
 Файловая память остаётся основной (мгновенная, без контейнеров); граф — слой поверх неё.
@@ -94,14 +114,22 @@ config.yaml                 конфиг MCP: типы сущностей    bui
 регулярки, энтропия) · `sessions_extract.py` (jsonl транскриптов → эпизоды, `--check`) · `inbox_extract.py` · `bulk_load.py`
 (память, `--hash-names`) · `bulk_load_sessions.py` (jsonl → граф, `--any-group`) · `falkor_vector_patch.py` (HNSW-индекс вместо скана,
 140 мс → 1.5 мс) · `embed_chunk_patch.py` (≤32 текстов/запрос) · `merge_aliases.py` · `scrub_graph.py` · `build_main.sh` ·
-`cron_load.sh` · `chain_watch.sh` · `status.sh` · `setup.sh` · `tei.sh` · `mcp_client.py` · `or_proxy.py` (учёт расходов, опционально) · `lib.sh`.
+`cron_load.sh` · `fixup.sh` (добивка сорванных порций) · `backup.sh` (снимок FalkorDB) · `chain_watch.sh` · `status.sh` · `setup.sh` ·
+`tei.sh` · `mcp_client.py` · `or_proxy.py` (учёт расходов, опционально) · `lib.sh` · `sitecustomize.py` (патчи в MCP-сервер) ·
+`start-services.sh` (entrypoint контейнера: ждёт PONG).
 
-## Пять правил, которые нельзя нарушать
+## Шесть правил, которые нельзя нарушать
 
 1. **Любой текст в граф — только через `secret_filter`**, после загрузки — `scrub_graph` как контроль (ожидается 0).
    Словарь секретов живёт в памяти процесса; в yaml — только пути к файлам.
 2. **Один писатель на граф** (flock). Порция 12, не больше: дедуп-ответ модели рвётся по лимиту вывода.
 3. **Смена эмбеддера = другая размерность = граф перезалить.** bge-m3 локальный и облачный совместимы.
 4. **Правка работающего bash-скрипта не действует** (bash читает файл целиком при старте) — перезапускать.
-   Бинд-маунт файла держит старый inode — монтировать каталоги.
-5. Разрушительное (`GRAPH.DELETE`, `clear_graph`, `rm state/*`, смена крона) — только по явному «ок» владельца.
+   Бинд-маунт файла держит старый inode — монтировать каталоги (единственные файлы — `config.yaml` и
+   `start-services.sh`: не двигать их на хосте, иначе контейнер не перезапустится: «mount … not a directory»).
+5. **Снимок перед разрушительным**: `backup.sh` до `GRAPH.DELETE`, `clear_graph`, `rm state/*`, пересоздания контейнера,
+   смены эмбеддера; путь снимка и откат — в отчёт. Само разрушительное — в рамках поставленной задачи, без лишних вопросов;
+   вне задачи — по явному «ок» владельца.
+6. **Патчи должны стоять и в MCP-сервере**, не только в загрузчиках (`GRAPHITI_PATCH=1` в compose) — иначе поиск на
+   большом графе вешает базу. Логи и greps по ним — с `-a` (вывод модели делает лог «бинарным» для grep); процессы
+   убивать по PID через `pgrep -f "[x]…"`, не `pkill -f "<имя>"` из оболочки с тем же именем в командной строке.

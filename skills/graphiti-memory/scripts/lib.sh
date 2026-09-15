@@ -11,14 +11,26 @@ GM_KEY=${!GM_KEY_VAR:-}
 # запуск python внутри контейнера с полным набором env загрузчика (ключ — только здесь, в лог не печатать)
 DEX="docker exec $GM_DOCKER_ENV -e OPENAI_API_KEY=$GM_KEY $GM_CONTAINER $GM_PY"
 gm_log()  { echo "=== $(date -u +%FT%TZ) $*"; }
-gm_filt() { grep --line-buffered -vE "$GM_LOG_FILTER" | sed -u "s/^/[$1] /"; }   # предупреждения graphiti — не ошибки
+# Фильтр лога загрузчика: предупреждения graphiti (log_filter) — не ошибки, убираем; но строки `!! batch N ошибка: …`
+# пропускаем ВСЕГДА, даже если текст ошибки содержит слово из фильтра (Unterminated string…) — иначе сторож не видит
+# сорванных порций (грабля 15.09.2026). Вывод модели делает лог «бинарным» для grep → всюду grep -a / awk.
+gm_filt_raw() { awk -v f="$GM_LOG_FILTER" '/^[[:space:]]*!! batch/ {print; fflush(); next} $0 !~ f {print; fflush()}'; }
+gm_filt()     { gm_filt_raw | sed -u "s/^/[$1] /"; }
+gm_errs()     { grep -a -c "!! batch" "$1" 2>/dev/null || echo 0; }   # сорванных порций в логе
+gm_kill()     { # убить процессы по шаблону, НЕ задев свою оболочку и её родителей (pkill -f "<имя>" из команды,
+                # содержащей это имя, убивает саму оболочку — грабля 15.09.2026): исключаем всю цепочку предков $$
+  local p a anc=" $$ "; a=$$
+  while [ "$a" -gt 1 ] 2>/dev/null; do a=$(awk '{print $4}' "/proc/$a/stat" 2>/dev/null) || break; anc="$anc$a "; done
+  for p in $(pgrep -f "$1"); do [[ "$anc" == *" $p "* ]] || kill "$p" 2>/dev/null; done; }
+gm_backup() { # снимок FalkorDB (SAVE + копия dump.rdb, 600) в backup.dir с ретенцией — ПЕРЕД любым разрушительным
+  "$GM_SCRIPTS/backup.sh" "${1:-manual}"; }
 gm_sync_loaders() {
   # Скрипты и конфиг внутрь контейнера. Если каталоги смонтированы (compose из скилла) — ничего копировать не надо;
   # иначе (старый контейнер без монтирования) — кладём через `cat >` (docker cp в этот образ падает с «mkdirat … file exists»).
   local mounts; mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$GM_CONTAINER" 2>/dev/null)
   docker exec "$GM_CONTAINER" mkdir -p /app/loaders /app/conf /data/sessions_filtered /app/tools/state >/dev/null 2>&1
   if [[ " $mounts " != *" /app/loaders "* ]]; then
-    for f in gm_config.py bulk_load.py bulk_load_sessions.py falkor_vector_patch.py embed_chunk_patch.py merge_aliases.py; do
+    for f in gm_config.py bulk_load.py bulk_load_sessions.py falkor_vector_patch.py embed_chunk_patch.py merge_aliases.py sitecustomize.py; do
       docker exec -i "$GM_CONTAINER" sh -c "cat > /app/loaders/$f" < "$GM_SCRIPTS/$f"; done
     docker exec "$GM_CONTAINER" sh -c "rm -rf /app/loaders/__pycache__"
   fi
@@ -28,7 +40,7 @@ gm_push() {  # файл эпизодов → /data/sessions_filtered (если �
   local mounts; mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$GM_CONTAINER" 2>/dev/null)
   [[ " $mounts " == *" /data/sessions_filtered "* ]] || docker exec -i "$GM_CONTAINER" sh -c "cat > /data/sessions_filtered/$(basename "$1")" < "$1"
 }
-gm_merge() { gm_log "склейка псевдонимов ($1)"; $DEX /app/loaders/merge_aliases.py --graph "$GM_GRAPH" --apply 2>&1 | grep -E "готово|Traceback|Error" | sed -u 's/^/[merge] /'; }
+gm_merge() { gm_log "склейка псевдонимов ($1)"; $DEX /app/loaders/merge_aliases.py --graph "$GM_GRAPH" --apply 2>&1 | grep -a -E "готово|Traceback|Error" | sed -u 's/^/[merge] /'; }
 gm_scrub() { "$GM_HOST_PY" "$GM_SCRIPTS/scrub_graph.py" --graphs "$GM_GRAPH" --apply 2>&1; }
 gm_counts() {  # карточек / фактов / эпизодов графа
   local R="docker exec $GM_CONTAINER redis-cli"

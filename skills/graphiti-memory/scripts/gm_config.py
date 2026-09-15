@@ -145,6 +145,7 @@ def _shell(c):
         'GM_LOG_FILTER': c.get('load.log_filter', 'not found in nodes|invalid duplicate|Unterminated|unknown entity'),
         'GM_MEMORY_MOUNT': c.get('sources.memory.mount', ''), 'GM_MEMORY_EXCLUDE': ','.join(c.get('sources.memory.exclude', []) or []),
         'GM_HAS_TRANSCRIPTS': '1' if c.get('sources.transcripts.path') else '', 'GM_HAS_INBOX': '1' if c.get('sources.inbox.path') else '',
+        'GM_BACKUP_DIR': c.get('backup.dir') or os.path.join(c.deploy_dir, 'backups'), 'GM_BACKUP_KEEP': c.get('backup.keep', 5),
     }
     for k, v in out.items(): print(f'{k}={shlex.quote(str(v))}')
 
@@ -156,19 +157,27 @@ def _compose(c):
         'services': {'graphiti': {
             'image': c.get('image', 'zepai/knowledge-graph-mcp:latest'), 'container_name': c.container, 'restart': 'unless-stopped',
             'env_file': c.get('llm.env_file', '.env'),
+            # свой стартовый скрипт: ждёт именно PONG от FalkorDB (при большом RDB redis-cli ping отвечает LOADING с кодом 0 →
+            # MCP стартовал раньше базы, падал, контейнер уходил в цикл рестартов и загрузка RDB начиналась заново)
+            'entrypoint': ['/bin/sh', '/start-services.sh'],
             'environment': ['BROWSER=1', 'FALKORDB_URI=redis://localhost:6379', 'FALKORDB_DATABASE=default_db',
                             'CONFIG_PATH=/app/mcp/config/config.yaml', 'GRAPHITI_TELEMETRY_ENABLED=false',
                             f"GRAPHITI_GROUP_ID={c.graph}", f"MODEL_NAME={c.get('llm.mcp_model') or c.get('llm.model')}",
                             f"OPENAI_API_URL={c.get('llm.mcp_api_url') or c.get('llm.api_url')}",
                             f"EMBEDDER_MODEL={c.get('embedder.model')}", f"EMBEDDER_DIMENSIONS={c.get('embedder.dimensions', 1024)}",
-                            f"EMBEDDER_API_URL={embed_url}", f"SEMAPHORE_LIMIT={c.get('mcp.semaphore', 5)}"],
-            'volumes': ['falkordb_data:/var/lib/falkordb/data', 'mcp_logs:/var/log/graphiti', './config.yaml:/app/mcp/config/config.yaml:ro'] + c.mounts(),
+                            f"EMBEDDER_API_URL={embed_url}", f"SEMAPHORE_LIMIT={c.get('mcp.semaphore', 5)}",
+                            # патчи graphiti-core и для MCP-СЕРВЕРА (scripts/sitecustomize.py): без них поиск на большом графе
+                            # (7k карточек / 30k фактов) идёт полным сканом + fulltext-перебором → >120 с, FalkorDB виснет
+                            'PYTHONPATH=/app/loaders', 'GRAPHITI_PATCH=1', 'VECTOR_INDEX=1'],
+            'volumes': ['falkordb_data:/var/lib/falkordb/data', 'mcp_logs:/var/log/graphiti', './config.yaml:/app/mcp/config/config.yaml:ro',
+                        './scripts/start-services.sh:/start-services.sh:ro'] + c.mounts(),
             'ports': [f"127.0.0.1:{p.get('falkordb', 6379)}:6379", f"127.0.0.1:{p.get('ui', 3001)}:3000", f"127.0.0.1:{p.get('mcp', 8000)}:8000"],
             'healthcheck': {'test': ['CMD', 'redis-cli', '-p', '6379', 'ping'], 'interval': '10s', 'timeout': '5s', 'retries': 5, 'start_period': '15s'},
         }},
         'volumes': {'falkordb_data': {}, 'mcp_logs': {}},
     }
-    print('# сгенерировано gm_config.py render-compose из', c.path, '— порты ТОЛЬКО 127.0.0.1; каталоги монтируются каталогами (не файлами)')
+    print('# сгенерировано gm_config.py render-compose из', c.path, '— порты ТОЛЬКО 127.0.0.1; каталоги монтируются каталогами (не файлами;')
+    print('# единственные файлы — config.yaml и start-services.sh: не переносить/не удалять их на хосте, иначе контейнер не перезапустится)')
     print(yaml.safe_dump(y, allow_unicode=True, sort_keys=False))
 
 
@@ -191,6 +200,9 @@ def _check(c):
     n = sum(len(glob.glob(g)) for g in c.get('secrets.files', []) or [])
     p(f'secrets.files: {len(c.get("secrets.files", []) or [])} шаблонов → {n} файлов на хосте', True)
     p(f'aliases: {len(c.get("aliases", {}) or {})} канонических имён', True)
+    p(f'backup.dir: {c.get("backup.dir") or os.path.join(c.deploy_dir, "backups")} (keep {c.get("backup.keep", 5)})', True)
+    sk = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'start-services.sh')
+    p(f'scripts/start-services.sh рядом с gm_config.py (entrypoint контейнера)', os.path.isfile(sk))
     for k in ('memory', 'transcripts', 'inbox'):
         p(f'instructions.{k}: {len(c.get(f"instructions.{k}", "") or "")} симв.', bool(c.get(f'instructions.{k}')))
     sys.exit(0 if ok else 1)

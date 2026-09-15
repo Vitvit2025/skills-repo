@@ -35,9 +35,15 @@ $GM_HOST_PY scripts/sessions_extract.py --source transcripts && $GM_HOST_PY scri
 
 ## Полная сборка / пересборка
 ```bash
+scripts/backup.sh pre-build                                     # если граф уже есть и его перезаливают — снимок ДО
 nohup setsid scripts/build_main.sh > build_main.log 2>&1 &     # по build.steps из конфига, идемпотентно
 scripts/chain_watch.sh                                          # сторож (tmux / Monitor): PROGRESS, ALERT, DONE
-grep -c "!! batch" build_main.log                               # сорванных порций
+grep -a -c "!! batch" build_main.log                            # сорванных порций (grep -a: лог «бинарный» из-за вывода модели)
+```
+**После сборки — добивка** (сорванные порции state не отмечает; загрузчик подхватит только их):
+```bash
+nohup setsid scripts/fixup.sh > fixup.log 2>&1 &               # порция 6, затем merge + scrub; повторить, если снова `!! batch`
+LOG=fixup.log PROC=fixup.sh DONE_MARK="добивка завершена" scripts/chain_watch.sh
 ```
 **Собрать main из существующего графа** (самый большой блок уже загружен в `<old>`):
 ```bash
@@ -57,11 +63,26 @@ $GM_HOST_PY scripts/scrub_graph.py --graphs main           # отчёт по с�
 $GM_HOST_PY scripts/scrub_graph.py --graphs main --apply   # заменить на [REDACTED:…]
 ```
 Перед первым боевым merge — репетиция: `$R GRAPH.COPY main main_test` → прогон на `main_test` → `$R GRAPH.DELETE main_test`.
-
-## Откат / удаление (только по явному «ок»)
+**Дописать прозвища после сборки** (модель плодит варианты одной машины/человека):
 ```bash
-$R GRAPH.COPY main main_bak_$(date +%F)          # снимок перед рискованным
-$R GRAPH.DELETE <graph>; rm -f state/<graph>.json  # снести граф и его state (пересборка — build_main.sh)
+$R GRAPH.QUERY main "MATCH (n:Server) RETURN n.name ORDER BY n.name" | grep -v -E "^(n.name|Cached|Query)"
+$R GRAPH.QUERY main "MATCH (n:Human) RETURN n.name ORDER BY n.name"  | grep -v -E "^(n.name|Cached|Query)"
+```
+→ варианты («Амстердам-dev», «Aмстердам» латиницей, «старом dev», «двойник Алматы», логин e-mail владельца) — в `aliases`
+конфига → `merge_aliases --apply`. Мусорные Server-узлы (IP Telegram, подсети 10.x, id серверов у провайдера) — известный
+дефект дешёвой модели; лечится инструкцией извлечения, склейкой не трогаются.
+
+## Снимок и откат
+**Правило: снимок ПЕРЕД любым разрушительным** (GRAPH.DELETE, clear_graph, rm state/*, пересоздание контейнера, смена эмбеддера).
+```bash
+scripts/backup.sh <метка>                        # redis SAVE + копия dump.rdb (600) → backup.dir/dump-<дата>-<метка>.rdb, ретенция backup.keep
+ls -lt $(scripts/gm_config.py get backup.dir)    # что есть
+# откат: docker stop <c> && cp <снимок> <том>/dump.rdb && docker start <c>   (том: docker inspect -f '{{range .Mounts}}{{.Source}} {{.Destination}}\n{{end}}' <c>)
+$R GRAPH.COPY main main_bak_$(date +%F)          # лёгкий вариант: копия одного графа внутри базы (рестарта не требует)
+```
+Удаление (в рамках поставленной задачи — после снимка; вне задачи — по явному «ок»):
+```bash
+$R GRAPH.DELETE <graph>; mv state/<graph>.json state/<graph>.json.bak-$(date +%F)   # снести граф; state — в сторону, не rm
 scripts/mcp_client.py clear_graph '{}'            # MCP-вариант (граф по умолчанию)
 ```
 
@@ -73,12 +94,18 @@ docker run --rm -v <compose>_falkordb_data:/d -v $PWD:/b alpine tar czf /b/falko
 
 ## Контейнер и модели
 ```bash
-docker compose up -d; docker logs --tail 50 graphiti-mcp; docker compose restart
-scripts/gm_config.py render-compose > docker-compose.yml     # после правки конфига (порты, тома)
+scripts/backup.sh pre-restart                                # снимок перед пересозданием/рестартом
+docker compose up -d; docker logs --tail 50 graphiti-mcp     # после старта: PONG ждём ~1 мин на RDB 360 МБ
+docker inspect -f '{{.RestartCount}}' graphiti-mcp           # 0 ожидается; >0 = MCP стартует раньше базы (см. типовые ошибки)
+docker logs graphiti-mcp 2>&1 | grep -a falkor_vector_patch  # патч в MCP-сервере включён (иначе поиск виснет)
+scripts/gm_config.py render-compose > docker-compose.yml     # после правки конфига (порты, тома); затем backup.sh + compose up -d
 scripts/tei.sh                                               # локальный эмбеддер для MCP
 curl -s https://openrouter.ai/api/v1/auth/key -H "Authorization: Bearer $OPENAI_API_KEY"   # usage по ключу
 ```
 Смена эмбеддера (модель/размерность) → `EMBEDDER_*` в конфиге → граф перезалить целиком.
+Если FalkorDB завис (одно ядро 100 %, `redis-cli PING` молчит минуты — тяжёлый запрос без патча): убить загрузчики по PID
+(`. scripts/lib.sh; gm_kill bulk_load` — исключает свою оболочку и её родителей; НЕ `pkill -f`: он убьёт и оболочку с тем же текстом в команде),
+затем `docker restart -t 5 <c>`; RDB на диске автосохранён (потеря — незавершённая порция, state её не отметил → fixup).
 
 ## Крон
 ```
@@ -98,4 +125,10 @@ curl -s https://openrouter.ai/api/v1/auth/key -H "Authorization: Bearer $OPENAI_
 | `уже грузится другим процессом` | flock: второй загрузчик на ту же группу — дождаться |
 | `Target entity not found`, `Unterminated string`, `invalid duplicate` | предупреждения graphiti/ретраи — не ошибки |
 | «Амстердам» и «201.51.23.17» — две карточки | дедуп ищет по похожести имён → `aliases` + `merge_aliases` |
+| `search_memory_facts` через MCP висит >120 с, FalkorDB 100 % одного ядра, PING молчит | патчи не стоят в MCP-сервере → в compose `PYTHONPATH=/app/loaders`, `GRAPHITI_PATCH=1`, `VECTOR_INDEX=1` (sitecustomize.py); проверка `docker logs … | grep falkor_vector_patch` |
+| контейнер в цикле рестартов, в логах `FalkorDB is ready!` → `Creating OpenAI client` → тишина; RDB грузится заново | штатный start-services.sh принимает `LOADING` за готовность → наш `scripts/start-services.sh` как entrypoint (ждёт `PONG`) |
+| `docker restart` → `mount … not a directory` | bind-mount одного файла, а на хосте файл переехал/стал каталогом → `docker compose up -d` с актуальным compose; монтировать каталоги |
+| сторож молчит, а порция сорвана | строка `!! batch … Unterminated string` попадала под фильтр предупреждений → `gm_filt_raw` пропускает `!! batch` всегда; greps с `-a` |
+| перезапущенный сторож повторно алертит старую ошибку | счётчик стартует с нуля → в `chain_watch.sh` начальное значение берётся из лога (уже исправлено) |
+| `pkill -f run_x.sh` убил мою оболочку | шаблон совпал с командной строкой самой оболочки → `pgrep -f "[r]un_x"` по PID |
 | `AsyncMessages.create() got an unexpected keyword argument 'temperature'` | нативный anthropic-клиент в образе сломан → `llm.provider: openai` + OpenAI-совместимый URL |

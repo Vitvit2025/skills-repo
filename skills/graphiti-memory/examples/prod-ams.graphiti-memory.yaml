@@ -133,16 +133,20 @@ secrets:                                         # словарь РЕАЛЬНЫ
   exclude_rules_prose: [kv_ru]                   # правило «пароль: …» по-русски шумит в прозе/графе
 
 aliases:                                         # пост-проход merge_aliases: канон ← прозвища (без учёта регистра)
-  201.51.23.17:   {labels: [Server], aliases: [prod, prod-ams, prod-server, прод, Амстердам, Amsterdam, dev-ams-201, 100.116.139.113, Timeweb Амстердам]}
-  80.90.182.136:  {labels: [Server], aliases: [Алматы, Almaty, Алматы-двойник, тёплый двойник]}
-  45.145.168.13:  {labels: [Server], aliases: [dev, dev-сервер, dev-сервере, dev-server, Beget-Латвия, Инфраструктура в локации Латвия]}
-  83.222.24.231:  {labels: [Server], aliases: [pokos-ru-copy, RU-копия, Beget RU-копия]}
+  # после сборки main (15.09) список Server/Human выгружен из графа и таблица дополнена: модель плодит варианты
+  # («Амстердам-dev», «Aмстердам» с латинской A, «старом dev», «двойник Алматы»); прогон merge_aliases повторить после дописки
+  201.51.23.17:   {labels: [Server], aliases: [prod, prod-ams, prod-server, прод, Амстердам, Aмстердам, Amsterdam, dev-ams-201, 100.116.139.113, Timeweb Амстердам,
+                   "Амстердам (будущий dev)", Амстердам-dev, Амстердам-веб, Амстердам-как-dev, Amsterdam-dev, NL-прод, новый прод, новый сервер Амстердам]}
+  80.90.182.136:  {labels: [Server], aliases: [Алматы, Almaty, Алматы-двойник, тёплый двойник, двойник Алматы, теплого двойника, казахский сервер, "Алматы (Timeweb)"]}
+  45.145.168.13:  {labels: [Server], aliases: [dev, dev-сервер, dev-сервере, dev-server, Beget-Латвия, Инфраструктура в локации Латвия, старом dev, старый dev, dev-сервер ewa, Латвия, "Beget (Латвия)"]}
+  83.222.24.231:  {labels: [Server], aliases: [pokos-ru-copy, RU-копия, Beget RU-копия, pokos-ru-copy 83.222.24.231]}
   155.212.139.213: {labels: [Server], aliases: [nspd-proxy2]}
   80.90.182.102:  {labels: [Server], aliases: [kz-probe]}
   194.87.130.174: {labels: [Server], aliases: [vpn-eu-antizapret, nl-1, VPN-хаб, VPN EU]}
   100.102.54.48:  {labels: [Server], aliases: [pc-home-v, home_pc, домашний комп, домашний ПК, Домашний ПК]}
   46.16.15.120:   {labels: [Service, Server], aliases: [Selectel-прокси, NSPD-прокси, НСПД-прокси, Selectel-IP, Selectel proxy, NSPD-proxy]}
-  Владелец:       {labels: [Human], aliases: [Виталий, Виталий Шкуренко, "ID 1, Виталий", Vitvit2025, Vitvit2022, "Виталий · Max", ВЛАДЕЛЕЦ, владелец, Vit, Owner, owner, "159465823"]}
+  Владелец:       {labels: [Human], aliases: [Виталий, Виталий Шкуренко, "ID 1, Виталий", Vitvit2025, Vitvit2022, "Виталий · Max", ВЛАДЕЛЕЦ, владелец, Vit, Owner, owner, "159465823",
+                   Vladelets, t9933149594, Владелец сервера, "Владелец (Виталий)"]}   # t9933149594 = логин e-mail владельца (не секрет, но склеить)
   Claude Code:    {labels: [Tool], aliases: [Claude, Ассистент, ассистент, "Claude (ассистент)"]}
 alias_rules:
   local_ips: [127.0.0.1, 172.17.0.1, localhost, 0.0.0.0]   # тут порт = разные сервисы, IP:port не склеивать
@@ -194,3 +198,7 @@ alerts:                                          # Telegram владельцу �
 cron:
   schedule: "30 3 * * *"
   lock: /run/graphiti-cron.lock
+
+backup:                                          # scripts/backup.sh: redis SAVE + копия dump.rdb (600) — ПЕРЕД любым разрушительным
+  dir: /root/backups/graphiti                    # первый снимок 15.09: dump-2026-09-15-1845-main-built.rdb (364 МБ, все графы до удаления старых)
+  keep: 5                                        # ретенция снимков; том целиком — в ночной rclone-бэкап отдельно

@@ -14,10 +14,10 @@ log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
 SUM=""; ERR=0
 run_load() {  # tag, loader args...
   local tag=$1; shift
-  local out; out=$($DEX "$@" --group "$G" --batch "$GM_BATCH" 2>&1 | grep -vE "$GM_LOG_FILTER")
+  local out; out=$($DEX "$@" --group "$G" --batch "$GM_BATCH" 2>&1 | gm_filt_raw)   # строки `!! batch` фильтр не глотает
   echo "$out" >> "$LOG"
-  local n; n=$(echo "$out" | grep -oE "новых эпизодов=[0-9]+" | grep -oE "[0-9]+" | head -1)
-  local e; e=$(echo "$out" | grep -c "!! batch")
+  local n; n=$(echo "$out" | grep -a -oE "новых эпизодов=[0-9]+" | grep -oE "[0-9]+" | head -1)
+  local e; e=$(echo "$out" | grep -a -c "!! batch")
   ERR=$((ERR+e)); SUM="$SUM $tag:+${n:-?}${e:+/ошибок $e}"
 }
 log "=== старт докачки → $G"
@@ -40,11 +40,11 @@ if [ -n "$GM_HAS_INBOX" ]; then
     || { log "!! inbox: экстракция не прошла"; ERR=$((ERR+1)); }
 fi
 # 4) склейка
-$DEX /app/loaders/merge_aliases.py --graph "$G" --apply 2>&1 | grep -E "готово" >> "$LOG"
+$DEX /app/loaders/merge_aliases.py --graph "$G" --apply 2>&1 | grep -a -E "готово" >> "$LOG"
 # 5) контроль секретов
-SCRUB=$(gm_scrub | grep -oE "полей с секретами/телефонами: [0-9]+" | awk '{s+=$NF} END{print s+0}')
+SCRUB=$(gm_scrub | grep -a -oE "полей с секретами/телефонами: [0-9]+" | awk '{s+=$NF} END{print s+0}')
 [ "${SCRUB:-0}" != "0" ] && log "!! контроль секретов: исправлено $SCRUB полей (докачка пропустила секреты — проверить фильтр)"
-MSG="Graphiti-докачка $(date -u +%d.%m\ %H:%M) → $G:$SUM; секретов после фильтра: ${SCRUB:-0}; ошибок: $ERR; $(( ($(date +%s)-T0)/60 )) мин; $(gm_counts)"
+MSG="Graphiti-докачка $(date -u +%d.%m\ %H:%M) → $G:$SUM; секретов после фильтра: ${SCRUB:-0}; ошибок: $ERR$([ "$ERR" != 0 ] && echo ' (сорванные порции догрузит следующий прогон или scripts/fixup.sh)'); $(( ($(date +%s)-T0)/60 )) мин; $(gm_counts)"
 log "$MSG"
 # 6) Telegram — только при ошибках/секретах
 if [ "$ERR" != "0" ] || [ "${SCRUB:-0}" != "0" ]; then gm_alert "⚠️ $MSG"; fi

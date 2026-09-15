@@ -8,6 +8,8 @@
 # После КАЖДОГО шага — merge_aliases (склейка псевдонимов); в конце — scrub_graph (контроль секретов, ожидается 0).
 # Один писатель на граф (flock в загрузчиках) — параллелить НЕЛЬЗЯ. Идемпотентно: state/<graph>.json — перезапуск продолжает.
 # Загрузчик, умерший без «готово», перезапускается до 3 раз. Порядок: самый большой блок первым, дальше хронологически.
+# Сорванные порции (`!! batch` в логе; state их не отмечает) добираются потом: scripts/fixup.sh. Сборка ничего не удаляет,
+# но если граф уже есть и его будут перезаливать — сначала scripts/backup.sh.
 # Запуск: nohup setsid scripts/build_main.sh > build_main.log 2>&1 &     Сторож: scripts/chain_watch.sh (Monitor / tmux).
 # Совет: если самый большой архив уже загружен в отдельный граф, вместо шага archive скопируй его:
 #   redis-cli GRAPH.COPY <старый> main; MATCH (n) SET n.group_id='main'; MATCH ()-[r]->() SET r.group_id='main'; cp state/<старый>.json state/main.json
@@ -17,7 +19,7 @@ load() { # tag, loader args...  (с автоперезапуском по лог
   local tag=$1; shift; local n
   for n in 1 2 3; do
     $DEX "$@" --group "$G" --batch "$BATCH" 2>&1 | gm_filt "$tag"
-    if grep -q "^\[$tag\] \[$G\] готово" "$LOG" 2>/dev/null || grep -q "^\[$tag\] \[$G\] .*новых эпизодов=0" "$LOG" 2>/dev/null; then return 0; fi
+    if grep -a -q "^\[$tag\] \[$G\] готово" "$LOG" 2>/dev/null || grep -a -q "^\[$tag\] \[$G\] .*новых эпизодов=0" "$LOG" 2>/dev/null; then return 0; fi
     gm_log "!! $tag: загрузчик завершился без «готово» (попытка $n) — перезапуск через 60 с"; sleep 60
   done
   gm_log "!! $tag: 3 попытки без «готово», иду дальше"; return 1
@@ -54,5 +56,6 @@ while read -r kind key instr; do
 done < <(python3 "$GM_SCRIPTS/gm_config.py" steps)
 gm_log "контроль секретов (scrub_graph --graphs $G --apply)"
 gm_scrub | tail -15 | sed -u 's/^/[scrub] /'
-gm_log "итог $G: $(gm_counts); ошибок порций: $(grep -c '!! batch' "$LOG" 2>/dev/null)"
+NERR=$(gm_errs "$LOG")
+gm_log "итог $G: $(gm_counts); сорванных порций: $NERR$([ "$NERR" != 0 ] && echo ' → прогони scripts/fixup.sh (догрузит только их)')"
 gm_log "цепочка завершена"

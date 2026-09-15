@@ -65,7 +65,9 @@ secrets:
   exclude_rules_prose: [kv_ru]
   # extra_patterns: [{name: mytoken, regex: 'mt_[A-Za-z0-9]{32}'}]
 
-aliases:                                       # канон ← прозвища (склейка после докачки)
+aliases:                                       # канон ← прозвища (склейка после докачки). После первой сборки выгрузи
+  # список карточек (redis-cli GRAPH.QUERY main "MATCH (n:Server) RETURN n.name" — так же Human) и допиши варианты сюда,
+  # затем merge_aliases ещё раз: дешёвая модель плодит «прод-dev», «Прод (будущий)», латиницу вместо кириллицы и т.п.
   10.0.0.5: {labels: [Server], aliases: [prod, прод, Amsterdam]}
   Владелец: {labels: [Human], aliases: [Owner, owner, "123456789"]}
   Claude Code: {labels: [Tool], aliases: [Claude, Ассистент]}
@@ -92,3 +94,4 @@ instructions:
 
 alerts: {env_file: /etc/myapp/telegram.env, token_var: BOT_TOKEN, chat_var: ALERT_CHAT_ID}   # только ошибки/секреты
 cron: {schedule: "30 3 * * *", lock: /run/graphiti-cron.lock}
+backup: {dir: /opt/graphiti-memory/backups, keep: 5}   # scripts/backup.sh — снимок FalkorDB ПЕРЕД любым разрушительным (GRAPH.DELETE, пересоздание контейнера)
