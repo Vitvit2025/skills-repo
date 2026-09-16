@@ -54,7 +54,9 @@ def main():
     ap.add_argument('--llm-days', type=float, default=7); ap.add_argument('--model', default='anthropic/claude-sonnet-5'); ap.add_argument('--limit-llm', type=int, default=0)
     ap.add_argument('--same-day', action='store_true', help='режим извлечения: снять invalid_at у фактов с окном < 1 дня БЕЗ требования погасителя '
                     '(модель извлечения ставит «попытка не сработала» = закончилось в тот же день; для графа знаний это артефакт)')
-    ap.add_argument('--since', default='', help='с --same-day: только факты, созданные не раньше этого времени (прогон крона)')
+    ap.add_argument('--since', default='', help='с --same-day: только факты, СОЗДАННЫЕ не раньше этого времени')
+    ap.add_argument('--expired-since', default='', help='с --same-day: факты, ПОГАШЕННЫЕ (expired_at) не раньше этого времени — в т.ч. старые, '
+                    'которые прогон погасил пересказом того же (окно valid_at→invalid_at < 1 дня у давнего факта = обе даты из одного дня = пересказ)')
     a = ap.parse_args()
     r = redis.Redis(host='127.0.0.1', port=6379, decode_responses=True)
     q = lambda c: r.execute_command('GRAPH.RO_QUERY', a.graph, c)[1]
@@ -73,9 +75,10 @@ def main():
         if not v or not i: stats['нет дат'] += 1; continue
         win = (i - v).total_seconds() / 86400
         if a.same_day:
-            c = p(ca)
+            c, ex = p(ca), p(ea)
             if since and (not c or c < since): continue
-            if win < 1: rule1.append((u, u)); stats['однодневные (извлечение)'] += 1
+            if a.expired_since and (not ex or ex < p(a.expired_since)): continue
+            if win < 1: rule1.append((u, u)); stats['однодневные'] += 1
             continue
         cands = [c for c in by_valid.get(str(ia), []) if c != u and (edges[c][0] in (s, t) or edges[c][1] in (s, t)) and str(edges[c][5]) >= str(ca)]
         if not cands: stats['без погасителя (история)'] += 1; continue

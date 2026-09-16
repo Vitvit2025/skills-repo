@@ -40,8 +40,10 @@ run_load() {  # tag, loader args...  → печатает "tag:+N[/ошибок 
 }
 log "$RUN_MARK (small_model=$SMALL)"
 SUM=""
-# 1) память прода
-SUM="$SUM $(run_load memory /app/loaders/bulk_load.py --source /data/memory --group $G --hash-names --exclude project_graphiti_memory.md)"
+# 1) память прода — через фильтр секретов на хосте (в контейнере нет словаря) → очищенная копия с теми же именами/mtime
+if .venv/bin/python memory_clean.py >> $LOG 2>&1; then
+  SUM="$SUM $(run_load memory /app/loaders/bulk_load.py --source /data/sessions_filtered/memory_clean --group $G --hash-names --exclude project_graphiti_memory.md)"
+else log "!! память: фильтр секретов не отработал, загрузка пропущена"; fi
 # 2) дайджесты сессий прода (вместо сырых транскриптов)
 if .venv/bin/python session_digest.py --src /root/.claude/projects/-root --out sessions_filtered --name episodes_digest.jsonl --min-idle-hours 2 >> $LOG 2>&1 \
    && put_file sessions_filtered/episodes_digest.jsonl /data/sessions_filtered/episodes_digest.jsonl; then
@@ -57,8 +59,9 @@ docker exec $C $PY /app/loaders/merge_aliases.py --graph $G --apply 2>&1 | grep 
 # 5) контроль секретов (карточки, факты, эпизоды, сообщества)
 SCRUB=$(.venv/bin/python scrub_graph.py --graphs $G --apply 2>&1 | grep -a -oE "полей с секретами/телефонами: [0-9]+" | awk '{s+=$NF} END{print s+0}')
 [ "${SCRUB:-0}" != "0" ] && log "!! контроль секретов: исправлено $SCRUB полей (докачка пропустила секреты — проверить фильтр)"
-# 5b) однодневные invalid_at из извлечения у фактов этого прогона («попытка не сработала» ≠ факт закончился) — снять
-.venv/bin/python repair_invalidations.py --graph $G --same-day --since "$T0_ISO" --apply 2>&1 | grep -a -E "^(разбор|восстановлено)" | sed 's/^/[same-day] /' >> $LOG
+# 5b) однодневные окна invalid_at, появившиеся в этом прогоне: из извлечения («попытка не сработала» ≠ факт закончился)
+#     и у старых фактов, погашенных пересказом того же (обе даты из одного дня) — снять
+.venv/bin/python repair_invalidations.py --graph $G --same-day --expired-since "$T0_ISO" --apply 2>&1 | grep -a -E "^(разбор|восстановлено)" | sed 's/^/[same-day] /' >> $LOG
 # 6) метрики качества прогона (код 2 = вне нормы)
 METRICS=$(.venv/bin/python metrics.py --since "$T0_ISO" --graph $G 2>&1); MRC=$?
 log "$METRICS"
