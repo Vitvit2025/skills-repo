@@ -32,7 +32,9 @@ INSTR = ("Текст — русские рабочие заметки админ
  "Не делай сущностями порты, сетевые интерфейсы, числовые идентификаторы серверов у провайдера, адреса вида host:port, форматы данных. "
  "Даты вида 26.07 или 14.09 относятся к 2026 году. invalid_at ставь ТОЛЬКО если в тексте явно сказано, что факт перестал быть верным "
  "(«закрыто», «больше не», «устарело», «до <дата>», «заменили на», «раньше … теперь …»); не выдумывай даты окончания и не ставь invalid_at по дате файла. "
- "Если в шапке файла стоит historical: true / баннер «АРХИВ dev до переезда» — факты о ролях серверов действовали до 2026-07-26.")
+ "Если в шапке файла стоит historical: true / баннер «АРХИВ dev до переезда» — факты о ролях серверов действовали до 2026-07-26. "
+ "Заголовок [Заметка памяти: статус …]: ПОДТВЕРЖДЕНО — факты актуальны; ПЛАН/ОТЛОЖЕНО — извлекай как намерения с пометкой «план», не как сделанное; "
+ "УСТАРЕЛО — факты заметки больше не действуют, ставь invalid_at = дата «сверено». Пометки в тексте: ✅ сделано, ⬜ план/не сделано, ❌ не сработало, ⏭ следующий шаг, 💤 отложено.")
 
 # Общие правила извлечения для ВСЕХ источников (16.09.2026, после аудита графа): нарицательные не сущности, люди с ролью,
 # книги — Publication, планы отличать от фактов. Загрузчики добавляют это к своей инструкции.
@@ -159,12 +161,17 @@ async def main():
         ref = datetime.datetime.fromtimestamp(mt, datetime.timezone.utc)
         head = ''
         if fm.get('historical') == 'true': head = f"[АРХИВ dev, написано {fm.get('written_at','?')}, роли серверов до 2026-07-26] "
-        elif fm.get('status'): head = f"[статус на 2026-09-15: {fm['status']}] "
+        elif fm.get('status') in ('current', 'flipped', 'mixed', 'closed'): head = f"[статус на 2026-09-15: {fm['status']}] "
+        elif fm.get('status'):
+            # поля заметок памяти прода с 16.09.2026 (уровень 1 «Obsidian»): status confirmed|proposed|paused|obsolete, verified_at, scope
+            st = {'confirmed': 'ПОДТВЕРЖДЕНО (актуально)', 'proposed': 'ПЛАН, не внедрено', 'paused': 'ОТЛОЖЕНО', 'obsolete': 'УСТАРЕЛО, больше не действует'}.get(fm['status'], fm['status'])
+            head = f"[Заметка памяти: статус {st}; сверено {fm.get('verified_at', '?')}; область {fm.get('scope', '?')}] "
         desc = fm.get('description', '')
         for i, c in enumerate(chunks(body)):
             name = f'{base_name}#{i+1}'
             if a.hash_names:
-                import hashlib; name += '@' + hashlib.sha1(c.encode()).hexdigest()[:8]
+                import hashlib  # статус/дата сверки входят в хеш: смена статуса заметки → кусок грузится заново (граф узнаёт, что план стал фактом или устарел)
+                name += '@' + hashlib.sha1((c + '|' + fm.get('status', '') + '|' + fm.get('verified_at', '')).encode()).hexdigest()[:8]
             if name in done or name in skip: continue
             content = (f'{head}{desc}\n\n' if (i == 0 and desc) else (f'{head}\n\n' if head else '')) + c
             episodes.append(RawEpisode(name=name, content=content, source_description=f'файл памяти {base_name}', source=EpisodeType.text, reference_time=ref))
