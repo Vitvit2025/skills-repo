@@ -1,30 +1,39 @@
 #!/usr/bin/env python3
-"""Фильтр секретов перед загрузкой текста в Graphiti.
+"""Фильтр секретов перед загрузкой текста в Graphiti (шаг 4 проекта graphiti-память).
 
 Три слоя:
-  1. СЛОВАРЬ — реальные значения секретов, собранные с хоста по шаблонам `secrets.files` из graphiti-memory.yaml
-     (env-файлы, ключи, приватные ssh-ключи, JSON с credentials …). Точное совпадение → [REDACTED:known].
+  1. СЛОВАРЬ — реальные значения секретов, собранные с хоста (env-файлы /etc/*, /root/*/.env*, .devmem-secrets,
+     приватные ssh-ключи, config.toml supabase, credentials.json …). Точное совпадение → [REDACTED:known].
      Словарь живёт только в памяти процесса, на диск не пишется.
   2. РЕГУЛЯРКИ — форматы известных токенов (OpenRouter/OpenAI/Anthropic, Telegram-бот, JWT, Google, AWS, GitHub,
      VK, Bitrix-вебхук, PEM-ключи, user:pass@ в URL, Authorization: Bearer, KEY=VALUE с секретным именем ключа,
-     русские «пароль: …», телефоны). Свои — `secrets.extra_patterns: [{name, regex}]`.
+     русские «пароль: …», телефоны +7…).
   3. ЭНТРОПИЯ — длинные (≥24) высокоэнтропийные токены без пробелов/точек (base64/hex-подобные) → [REDACTED:entropy].
 
-Как модуль:  from secret_filter import SecretFilter; sf = SecretFilter(); clean, stats = sf.redact(text)
-CLI:  python3 secret_filter.py --self-test | --scan <file> [--show-context]   [--config graphiti-memory.yaml]
+Использование как модуль:  from secret_filter import SecretFilter; sf = SecretFilter(); clean, stats = sf.redact(text)
+CLI:  python3 secret_filter.py --self-test | --scan <file> [--show-context]
 Проверка результата: sf.leaks(text) → список правил, которые ещё срабатывают (должен быть пуст).
-Грабли, которые уже учтены: имена файлов памяти вида project_x_2026-07-11 (snake_case), «passport» как «pass»,
-кириллица из комментариев env, имена ботов после слова «токен», имена моделей vendor/model, несекретные ключи (MODEL/ID/…).
 """
 import glob, json, math, os, re, sys, collections
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_SKIP_FILE_RE = r'(\.lock$|_state\.json$|balance_state|\.pub$|known_hosts|authorized_keys|\.example$)'
+SECRET_FILES = [
+    '/etc/2gis/*', '/etc/asocks/*', '/etc/beget/*', '/etc/chatgpt-drive-gw/*', '/etc/claude-inbox/*',
+    '/etc/cleaning-tenders/*', '/etc/ewa-redaktor/*', '/etc/ewa-secrets/*', '/etc/fleet/*', '/etc/iproxy/*',
+    '/etc/n8n/*', '/etc/patent-agent/*', '/etc/selectel/*', '/etc/smm-bot/*', '/etc/onec/*', '/etc/ozon/*',
+    '/etc/grafana-gate/*', '/etc/kontur/*', '/etc/ewa/*', '/etc/ewa-avito/*', '/etc/canva.env', '/etc/mailserver/*',
+    '/root/.devmem-secrets', '/root/.home-net-creds', '/root/.newsrv-api-token', '/root/n8n.env',
+    '/root/mailserver/mailserver.env', '/root/serdce-stolicy/.kn-creds', '/root/.docker/.token_seed',
+    '/root/ewa-research/.bot_research_coach_token', '/root/.claude/.credentials.json',
+    '/root/supabase-local/supabase/config.toml', '/root/supabase-local/.env*', '/root/.ssh/*',
+    '/root/*/.env', '/root/*/.env.*', '/root/*/*/.env', '/root/graphiti-mcp/.env',
+]
+SKIP_FILE_RE = re.compile(r'(\.lock$|_state\.json$|balance_state|\.pub$|known_hosts|authorized_keys|\.example$|vps_info\.json$|vps_rucopy_info\.json$)')
 # имена ключей, значения которых точно НЕ секрет (host/port/id/model…) — берём только если значение похоже на секрет
-NONSECRET_KEY_RE = re.compile(r'(HOST|PORT|URL|URI|USER|USERNAME|NAME|ID|IDS|PATH|DIR|CHAT|CHATS|MODEL|EMAIL|LOGIN|ENABLED|DEBUG|LEVEL|TZ|LANG|REGION|BUCKET|FOLDER|MODE|OWNER|ALLOWED_USERS|OWNER_IDS|VERSION|TIMEOUT|LIMIT|INTERVAL|DB|DATABASE|SCHEMA|TABLE|PREFIX|SUFFIX|FROM|TO|CC|DOMAIN|SCOPE|SCOPES|TYPE|AUDIENCE|ISSUER|PROJECT|ENDPOINT|ALGORITHM|SITE|CAMPAIGN|GROUP)$', re.I)
-SECRET_KEY_RE = re.compile(r'(PASS|PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_KEY|APIKEY|KEY|CREDENTIAL|CREDS|AUTH|COOKIE|SESSION|PRIVATE|SIGNATURE|SALT|SEED|TOTP|2FA|WEBHOOK|DSN)', re.I)
+NONSECRET_KEY_RE = re.compile(r'(HOST|PORT|URL|URI|USER|USERNAME|NAME|ID|IDS|PATH|DIR|CHAT|CHATS|MODEL|EMAIL|LOGIN|ENABLED|DEBUG|LEVEL|TZ|LANG|REGION|BUCKET|FOLDER|MODE|OWNER|ALLOWED_USERS|OWNER_IDS|VERSION|TIMEOUT|LIMIT|INTERVAL|DB|DATABASE|SCHEMA|TABLE|PREFIX|SUFFIX|FROM|TO|CC|DOMAIN|SCOPE|SCOPES|TYPE|AUDIENCE|ISSUER|PROJECT|ENDPOINT|ALGORITHM|SITE|CAMPAIGN|GROUP|EXPIRES.*|EXPIRY|_AT|TIME|DATE|_TS|FILE|NOTE|COMMENT|DESCRIPTION)$', re.I)
+SECRET_KEY_RE = re.compile(r'(PASS|PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_KEY|APIKEY|KEY|CREDENTIAL|CREDS|AUTH|COOKIE|SESSION|PRIVATE|SIGNATURE|SALT|SEED|TOTP|2FA|WEBHOOK|DSN|PSK|(?<![A-Z])PIN(?![A-Z])|PASSPHRASE)', re.I)
 STOPWORDS = {'true', 'false', 'none', 'null', 'postgres', 'password', 'admin', 'root', 'localhost', 'changeme',
-             'example', 'default', 'secret', 'token', 'production', 'development', 'utf-8', 'https', 'http'}
+             'example', 'default', 'secret', 'token', 'production', 'development', 'utf-8', 'https', 'http',
+             'local', 'dummy', 'placeholder', 'unused', 'disabled', 'redacted'}
 
 
 def _classes(s):
@@ -40,7 +49,13 @@ def _entropy(s):
 def _looks_secret(v, key=''):
     """Стоит ли класть значение в словарь."""
     v = v.strip().strip('"\'')
-    if len(v) < 6 or v.lower() in STOPWORDS: return False
+    if len(v) < 4 or v.lower() in STOPWORDS: return False
+    # 🔴 ключ с секретным именем (PASSWORD/PSK/2FA/TOKEN…) → значение секрет ВСЕГДА, без проверки «похоже ли»:
+    # 16.09.2026 пароль gpg-архива (7 цифр) и 2FA-код отбрасывались правилом «только цифры = IP/порт/версия»
+    if key and SECRET_KEY_RE.search(key) and not NONSECRET_KEY_RE.search(key):
+        # кроме заглушек, путей к файлу с секретом (ROOT_PASS_FILE=/etc/…), имён переменных и русских описаний (community_token_note)
+        return not v.startswith(('<', '${', '{{', '/', '~', '$')) and not re.fullmatch(r'[A-Z][A-Z0-9_]+', v) and not re.search(r'[А-Яа-яЁё]', v)
+    if len(v) < 6: return False
     if re.fullmatch(r'[A-Z][A-Z0-9_]+', v): return False  # имя переменной окружения, не значение
     if re.search(r'[А-Яа-яЁё]', v): return False  # секреты — ASCII; кириллица = описание
     if re.fullmatch(r'[\w-]+\.(?:md|py|sh|json|env|txt|yaml|yml|toml|log|conf|service|timer)', v): return False
@@ -51,7 +66,6 @@ def _looks_secret(v, key=''):
     if re.fullmatch(r'[\w-]+(?:\.[\w-]+)*\.(?:ru|com|pro|io|net|org|dev|su|kz|cloud|app)', v): return False  # домен
     if re.fullmatch(r'[\w.-]+(?:/[\w.-]+)+', v): return False  # путь / имя модели вида vendor/model
     if re.fullmatch(r'@?\w+[Bb]ot', v): return False  # имя телеграм-бота
-    if key and SECRET_KEY_RE.search(key) and not NONSECRET_KEY_RE.search(key): return len(v) >= 6
     if key and NONSECRET_KEY_RE.search(key): return False  # MODEL/ID/PROJECT/FOLDER/… — не секреты
     e = _entropy(v)
     return (_classes(v) >= 3 and len(v) >= 8 and e >= 3.0) or (len(v) >= 20 and e >= 3.8) or (len(v) >= 32 and e >= 3.5)
@@ -80,12 +94,11 @@ def _json_strings(obj, out):
     elif isinstance(obj, str) and _looks_secret(obj): out.add(obj)
 
 
-def build_dictionary(files, skip_re=DEFAULT_SKIP_FILE_RE):
-    skip = re.compile(skip_re) if skip_re else None
+def build_dictionary(files=SECRET_FILES):
     vals = set(); n_files = 0
     for pat in files:
-        for p in glob.glob(os.path.expanduser(pat)):
-            if not os.path.isfile(p) or (skip and skip.search(p)) or os.path.getsize(p) > 200_000: continue
+        for p in glob.glob(pat):
+            if not os.path.isfile(p) or SKIP_FILE_RE.search(p) or os.path.getsize(p) > 200_000: continue
             try: raw = open(p, errors='ignore').read()
             except Exception: continue
             n_files += 1
@@ -94,7 +107,7 @@ def build_dictionary(files, skip_re=DEFAULT_SKIP_FILE_RE):
                 try: _json_strings(json.loads(s), vals); continue
                 except Exception: pass
             lines = [l for l in raw.splitlines() if l.strip()]
-            if len(lines) == 1 and ' ' not in s and len(s) >= 4: vals.add(s); continue  # файл = один токен
+            if len(lines) == 1 and ' ' not in s and (len(s) >= 16 or _looks_secret(s)): vals.add(s); continue  # файл = один токен (не логин из 5 букв)
             if '-----BEGIN' in raw:  # приватный ключ: каждая строка тела
                 for l in lines:
                     if len(l.strip()) >= 20 and not l.startswith('-----'): vals.add(l.strip())
@@ -108,10 +121,14 @@ def build_dictionary(files, skip_re=DEFAULT_SKIP_FILE_RE):
                 if m and not is_comment:
                     k, v = m.group(1), m.group(2).strip().strip('"\'')
                     if _looks_secret(v, k): vals.add(v)
-                    for um in re.finditer(r'://([^/\s:@]+):([^@\s]+)@', v): vals.add(um.group(2))  # url с паролем
-                    if ':' in v and ' ' not in v and not v.startswith('http'):  # value может быть "user:pass"
-                        for part in v.split(':'):
-                            if _looks_secret(part, k): vals.add(part)
+                    # url с паролем внутри значения
+                    for um in re.finditer(r'://([^/\s:@]+):([^@\s]+)@', v): vals.add(um.group(2))
+                    # value может быть "user:pass" / телеграм-токен "botid:secret": первая половина (логин, id бота) — не секрет,
+                    # берём её только если сама похожа на секрет; последняя — по правилу ключа
+                    if ':' in v and ' ' not in v and not v.startswith('http'):
+                        parts = v.split(':')
+                        for i, part in enumerate(parts):
+                            if _looks_secret(part, k if i == len(parts) - 1 else ''): vals.add(part)
                 else:
                     toks = [t for t in re.split(r'[\s,;"\']+', body) if t.strip()]
                     single = (not is_comment and len(toks) == 1)
@@ -123,7 +140,7 @@ def build_dictionary(files, skip_re=DEFAULT_SKIP_FILE_RE):
                                 for part in tok.split(':'):
                                     if _bare_token_secret(part, single, is_comment): vals.add(part)
                         for um in re.finditer(r'://([^/\s:@]+):([^@\s]+)@', tok): vals.add(um.group(2))
-    vals = {v for v in vals if len(v) >= 6}
+    vals = {v for v in vals if len(v) >= 4}  # короткие (PIN/2FA) — с границами слова в known_re, см. SecretFilter
     return vals, n_files
 
 
@@ -147,46 +164,42 @@ PATTERNS = [
     ('sshpass', re.compile(r"(sshpass\s+-p\s*)['\"]?[^\s'\"]+['\"]?")),
     ('pgpass', re.compile(r'(\b(?:PGPASSWORD|MYSQL_PWD|REDISCLI_AUTH)=)[^\s;&|]+')),
     ('kv', re.compile(r'(?i)(\b[\w.-]*(?:password|passwd|pass|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?key|webhook|totp|cookie)(?![a-z])[\w.-]*\s*[=:]\s*["\']?)(?!\[REDACTED)[^\s"\'`,;<>&]{6,}')),
-    ('kv_ru', re.compile(r'(?i)((?:парол[ьяюеи]|пасс|токен|секрет|ключ api|api[- ]ключ|\btotp|\b2fa)\s*[:=—–-]?\s*[`"\']?)(?!\[REDACTED)(?![/~$<{\[@])[A-Za-z0-9!@#$%^&*()_+=./-]{6,}')),
+    # 🔴 значение в блоке кода отдельной строкой после слов «пароль/password/PSK/PIN/Wi-Fi» (утечка пароля Wi-Fi 16.09.2026:
+    # «пароль Wi-Fi сейчас такой:\n```\nXXXX\n```» — ни одна регулярка не дотягивалась). Группы: префикс и суффикс, значение между ними.
+    ('codeblock_pw', re.compile(r'(?i)((?:парол\w*|password|passphrase|\bpsk\b|pin-?код|\bpin\b|wi-?fi|пароль от)[^\n]{0,100}\n[ \t]*```[a-z]*[ \t]*\n[ \t]*)[^\s`]{4,64}([ \t]*\n[ \t]*```)')),
+    # «пароль Wi-Fi сейчас такой: XXXX», «PSK: XXXX» — между словом и двоеточием допускаем до 50 символов контекста
+    # контекст не может содержать «@» — иначе «токен @Social_Studies_rus_bot» резал имя бота (16.09)
+    ('kv_ru', re.compile(r'(?i)((?:парол[ьяюеи]\w*|пасс|токен|секрет|ключ api|api[- ]ключ|\btotp|\b2fa|\bpsk|pin-?код)(?:[^\n:=—–`"\'@]{0,50}?)\s*[:=—–-]?\s*[`"\']?)(?!\[REDACTED)(?![/~$<{\[@])[A-Za-z0-9!#$%^&*()_+=./-]{6,}')),
     ('phone', re.compile(r'(?<![\d.])(?:(?:\+7|8|7)[\s(-]?\d{3}[\s)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}|\+\d{9,14})(?![\d.])')),
     ('hex32', re.compile(r'\b[0-9a-f]{32,}\b')),
 ]
-KV_VALUE_SKIP = re.compile(r'^(?:\[REDACTED|/|~|\$|<|\{|https?://[^@]*$|[\d.:]+$|true$|false$|none$|null$|\w+\.(?:md|py|sh|json|env|txt|yaml|yml|toml)$)', re.I)
+KV_VALUE_SKIP = re.compile(r'^(?:\[REDACTED|/|~|\$|<|\{|https?://[^@]*$|\d+[.:][\d.:]*$|true$|false$|none$|null$|\w+\.(?:md|py|sh|json|env|txt|yaml|yml|toml)$)', re.I)  # IP/порт/версия — с точкой/двоеточием; чисто цифровой PIN после «пароль:» — секрет
 ENTROPY_TOKEN = re.compile(r'(?<![\w/.:=-])[A-Za-z0-9+/=_-]{24,}(?![\w/.:=-])')
 
 
 class SecretFilter:
-    def __init__(self, with_dictionary=True, config=None, files=None):
-        """files — список glob-шаблонов; иначе `secrets.files` из graphiti-memory.yaml (config — путь к нему)."""
-        skip_re = DEFAULT_SKIP_FILE_RE; extra = []
-        if files is None:
-            try:
-                from gm_config import cfg
-                c = cfg(config)
-                files = c.get('secrets.files', []) or []
-                skip_re = c.get('secrets.skip_file_re', DEFAULT_SKIP_FILE_RE)
-                extra = c.get('secrets.extra_patterns', []) or []
-            except SystemExit:
-                files = []
-        self.patterns = PATTERNS + [(p['name'], re.compile(p['regex'])) for p in extra]
-        self.known, self.n_files = (build_dictionary(files, skip_re) if with_dictionary else (set(), 0))
+    def __init__(self, with_dictionary=True):
+        self.known, self.n_files = (build_dictionary() if with_dictionary else (set(), 0))
         # длинные значения первыми, чтобы «user:pass» не порвать на части
         self.known_sorted = sorted(self.known, key=len, reverse=True)
-        self.known_re = re.compile('|'.join(re.escape(v) for v in self.known_sorted)) if self.known else None
+        # короткие буквенно-цифровые значения (<8) — только целым словом, иначе PIN «4471902» порежет любой id с этой подстрокой
+        def _alt(v):
+            return (r'(?<![A-Za-z0-9])' + re.escape(v) + r'(?![A-Za-z0-9])') if len(v) < 8 and v.isalnum() else re.escape(v)
+        self.known_re = re.compile('|'.join(_alt(v) for v in self.known_sorted)) if self.known else None
 
     def redact(self, text, exclude=()):
         """exclude — имена правил, которые не применять (для прозы/графа обычно 'kv_ru': слишком шумное)."""
         stats = collections.Counter()
         if self.known_re:
             text, n = self.known_re.subn('[REDACTED:known]', text); stats['known'] += n
-        for name, rx in self.patterns:
+        for name, rx in PATTERNS:
             if name in exclude: continue
             if name in ('kv', 'kv_ru'):
                 def _sub(m):
                     val = m.group(0)[len(m.group(1)):]
                     if KV_VALUE_SKIP.match(val): return m.group(0)
                     # kv_ru: «токен claud_nkt_bot» / «пароль brother_ro» — слово-имя, не значение; значение = есть цифра/спецсимвол или ≥3 класса
-                    if name == 'kv_ru' and not (re.search(r'[\d!@#$%^&*()+=]', val) or _classes(val) >= 3): return m.group(0)
+                    if name == 'kv_ru' and not (re.search(r'[\d!@#$%^&*()+=]', val) or _classes(val) >= 3) : return m.group(0)
                     stats[name] += 1; return m.group(1) + f'[REDACTED:{name}]'
                 text = rx.sub(_sub, text)
             elif rx.groups:
@@ -213,7 +226,7 @@ class SecretFilter:
         """Что ещё срабатывает на уже очищенном тексте (ожидается пусто)."""
         found = []
         if self.known_re and self.known_re.search(text): found.append('known')
-        for name, rx in self.patterns:
+        for name, rx in PATTERNS:
             if name in ('kv', 'kv_ru', 'phone'): continue
             for m in rx.finditer(text):
                 if '[REDACTED' not in m.group(0): found.append(name); break
@@ -223,19 +236,34 @@ class SecretFilter:
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(); ap.add_argument('--self-test', action='store_true'); ap.add_argument('--scan')
-    ap.add_argument('--show-context', action='store_true'); ap.add_argument('--config'); a = ap.parse_args()
-    sf = SecretFilter(config=a.config)
+    ap.add_argument('--show-context', action='store_true'); a = ap.parse_args()
+    sf = SecretFilter()
     print(f'словарь: {len(sf.known)} значений из {sf.n_files} файлов', file=sys.stderr)
     if a.self_test:
         sample = ('ключ OPENROUTER_API_KEY=sk-or-v1-' + 'a1b2c3d4' * 8 + ' и бот 123456789:AAHfz9Q-abcdefghijklmnopqrstuvwxyz012345 '
                   'jwt eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.abcdefghijklmnop12345 пароль: Qwe12345! '
-                  'psql postgresql://app:S3cr3tPass@127.0.0.1:5433/app вебхук https://x.bitrix24.ru/rest/1/abcdef1234567890/crm.deal.list '
-                  'путь /opt/app/core/geo/design.py ip 10.0.0.1 файл project_passport_philosophy.md '
+                  'psql postgresql://pokos:S3cr3tPass@127.0.0.1:5433/pokos вебхук https://x.bitrix24.ru/rest/1/abcdef1234567890/crm.deal.list '
+                  'путь /root/pokos-mvp/core/geo/design_sun.py ip 201.51.23.17 файл project_passport_philosophy.md '
                   'том graphiti-mcp_falkordb_data uuid f8aa1ee6-cc8e-4726-89b6-f4e4702a9c71 wg key 6GdY+lmR2sXk9pQz3tVb1nCw8eHf0aJu5yLo4iMr7Nk= '
-                  'sha 3b2f9c1e4d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c телефон +7 918 123-45-67 chat_id 123456789')
+                  'sha 3b2f9c1e4d5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c телефон +7 918 123-45-67 chat_id 159465823')
         out, st = sf.redact(sample); print(out); print(dict(st))
-        expect = {'openrouter', 'telegram', 'jwt', 'url_creds', 'bitrix_webhook', 'phone', 'hex32', 'entropy'}
-        missing = expect - set(st); print('self-test:', 'OK' if not missing else f'НЕ сработали {missing}')
+        # 🔴 обязательные случаи после утечек 16.09.2026 (значения выдуманы): цифровой пароль из хранилища, пароль в блоке кода, PSK с контекстом
+        import tempfile
+        with tempfile.NamedTemporaryFile('w', suffix='.env', delete=False) as tf:
+            tf.write('ARCHIVE_GPG_PASSWORD=4471902   # 7 цифр\nROUTER_WIFI_PSK=kqZ7wpTa\nMTPROTO_2FA=88431\nOWNER_LOGIN=admin\nDB_HOST=127.0.0.1\n'); tfp = tf.name
+        d, _ = build_dictionary([tfp]); os.unlink(tfp)
+        assert {'4471902', 'kqZ7wpTa', '88431'} <= d and 'admin' not in d and '127.0.0.1' not in d, f'словарь: {d}'
+        sf2 = SecretFilter(with_dictionary=False)
+        cases = {'пароль Wi-Fi сейчас такой:\n```\nmxQ9vLp2\n```\nВведи его': 'mxQ9vLp2',
+                 'В конфиге роутера пароль Wi-Fi: `mxQ9vLp2` и всё': 'mxQ9vLp2',
+                 'PSK для гостевой сети = Tr4ns1tPass': 'Tr4ns1tPass',
+                 'PIN-код от роутера: 4471902': '4471902'}
+        bad = [t for t, v in cases.items() if v in sf2.redact(t)[0]]
+        ok_noise = ['пароль сменить через 30 минут', 'токен claud_nkt_bot протух', 'пароль от grafana — admin', 'файл project_x_2026-07-11.md',
+                    'перевыпустить токен @Social_Studies_rus_bot через BotFather', 'токен бота @ewankt_bot лежит в /etc/claude-inbox/env']
+        noisy = [t for t in ok_noise if sf2.redact(t)[0] != t]
+        assert not bad and not noisy, f'не поймано: {bad}; ложные: {noisy}'
+        print('self-test: пароли из хранилища, блок кода, PSK/PIN с контекстом — OK; ложных срабатываний на шуме нет')
     if a.scan:
         txt = open(a.scan, errors='ignore').read(); out, st = sf.redact(txt)
         print(dict(st)); print('утечки после фильтра:', sf.leaks(out))
